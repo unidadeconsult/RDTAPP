@@ -4,18 +4,50 @@ import { normalizeKey, parseNumber, parsePercent, splitKeyValue } from "@/lib/pa
 export type ExtractContext = { homeTeam?: string; awayTeam?: string };
 
 /**
- * Extração best-effort de campos estruturados a partir do texto colado de um relatório de IA.
- * Primeiro tenta linhas no formato "rótulo: valor" (mais confiável); o que não for reconhecido
- * assim é buscado depois em linguagem natural (prosa). Nada é inventado — campos não encontrados
- * por nenhuma das duas passagens ficam vazios para preenchimento manual.
+ * Compara texto livre com o nome de um time aceitando forma abreviada (ex.: relatórios
+ * costumam dizer "Vasco" para "Vasco da Gama", "Athletico" para "Athletico Paranaense") —
+ * considera tanto o nome completo quanto a primeira palavra dele, quando não muito curta.
+ */
+function teamMatches(text: string, teamName: string): boolean {
+  const lower = text.toLowerCase();
+  if (lower.includes(teamName.toLowerCase())) return true;
+  const firstWord = teamName.split(/\s+/)[0];
+  if (firstWord.length >= 4 && lower.includes(firstWord.toLowerCase())) return true;
+  return false;
+}
+
+/** Padrões de regex (nome completo + forma abreviada) para casar contra o nome de um time. */
+function teamKeywordVariants(teamName: string | undefined): string[] {
+  if (!teamName) return [];
+  const firstWord = teamName.split(/\s+/)[0];
+  const variants = [escapeRegex(teamName)];
+  if (firstWord.length >= 4 && firstWord !== teamName) {
+    variants.push(escapeRegex(firstWord));
+  }
+  return variants;
+}
+
+/**
+ * Extração best-effort de campos a partir do texto colado de um relatório de IA, em três
+ * passagens, da mais para a menos confiável: (1) linhas "rótulo: valor", (2) seções numeradas
+ * com o rótulo numa linha e o conteúdo na(s) linha(s) seguinte(s) — formato comum em prompts
+ * "RDT" já usados pelas IAs — e (3) linguagem natural livre. Nada é inventado — campos não
+ * encontrados por nenhuma das passagens ficam vazios para preenchimento manual.
  */
 export function extractAIReportFields(
   rawText: string,
   context: ExtractContext = {}
 ): Partial<AIReport> {
   const structured = extractStructuredFields(rawText, context);
-  const prose = extractProseFields(rawText, context);
-  return mergeExtracted(structured, prose);
+  const sections = splitIntoSections(rawText);
+  const isSectioned = sections.length >= 3;
+  const sectioned = isSectioned ? buildPartialFromSections(sections, context) : {};
+  // Quando o texto já foi lido em seções, a varredura de prosa por palavra-chave solta
+  // ("risco", "argumento"...) tende a capturar o próprio título das seções (que geralmente
+  // contêm essas palavras) em vez de frases de argumento/risco de verdade — evita rodar essa
+  // parte nesse caso e confia nas listas já extraídas de cada seção dedicada.
+  const prose = extractProseFields(rawText, context, { skipCueLists: isSectioned });
+  return mergeExtracted(mergeExtracted(structured, sectioned), prose);
 }
 
 // ---------------------------------------------------------------------------
@@ -50,10 +82,18 @@ const RESULT_CUE = /vence|vencer|vit[oó]ria|ganha|triunfo|favorito/i;
  * (Vitória Casa)" como o mesmo mercado — sem isso, cada IA que escrever o resultado com suas
  * próprias palavras vira uma linha separada no consenso, mesmo dizendo a mesma coisa.
  */
+// Apostas combinadas ("Vitória do Vasco + BTTS Sim", "Dupla Chance: Mirassol ou Empate") não
+// cabem no modelo de um único mercado/seleção por palpite — canonizar reduziria a aposta a
+// só um dos componentes, fazendo parecer que a IA recomendou algo mais estreito do que
+// recomendou. Mais seguro manter o texto original nesses casos do que simplificar errado.
+const COMBO_MARKET_CUES = /\bdupla\s+chance\b/i;
+
 function canonicalizeMarket(
   text: string,
   context: ExtractContext = {}
 ): { market: string; selection: string } | undefined {
+  if (COMBO_MARKET_CUES.test(text) || / \+ /.test(text)) return undefined;
+
   for (const entry of MARKET_VOCAB) {
     if (entry.patterns.some((p) => p.test(text))) {
       return { market: entry.market, selection: entry.selection };
@@ -61,11 +101,10 @@ function canonicalizeMarket(
   }
 
   if (RESULT_CUE.test(text)) {
-    const lower = text.toLowerCase();
-    if (context.homeTeam && lower.includes(context.homeTeam.toLowerCase())) {
+    if (context.homeTeam && teamMatches(text, context.homeTeam)) {
       return { market: "Resultado final", selection: "Casa" };
     }
-    if (context.awayTeam && lower.includes(context.awayTeam.toLowerCase())) {
+    if (context.awayTeam && teamMatches(text, context.awayTeam)) {
       return { market: "Resultado final", selection: "Fora" };
     }
   }
@@ -189,7 +228,143 @@ function toMarketOpinion(
 }
 
 // ---------------------------------------------------------------------------
-// Passagem 2 — linguagem natural (prosa)
+// Passagem 2 — seções numeradas ("1. Favorito Apontado:" com o conteúdo na
+// linha seguinte, em vez de "rótulo: valor" na mesma linha).
+// ---------------------------------------------------------------------------
+
+// Exige espaço depois do "N." — sem isso, um número decimal sozinho numa linha
+// (ex.: a nota de confiança "7.5") seria lido como o início de uma nova seção.
+const SECTION_HEADER = /^#{0,6}\s*\*{0,2}\s*(\d{1,2})[.)]\s+([^*:\n]+?)\*{0,2}\s*:?\s*\**\s*$/;
+
+const SECTION_MAP: { pattern: RegExp; field: string }[] = [
+  { pattern: /favorit/i, field: "favorite" },
+  { pattern: /placar\s+prov[aá]vel|placar\s+estimado/i, field: "score" },
+  { pattern: /palpite\s+principal|mercado\s+principal/i, field: "main" },
+  { pattern: /palpite\s+alternativo|mercado\s+alternativo/i, field: "alternative" },
+  { pattern: /mercado\s+a\s+evitar|mercado\s+para\s+evitar/i, field: "avoid" },
+  { pattern: /nota\s+de\s+confian[cç]a|grau\s+de\s+confian[cç]a/i, field: "confidence" },
+  { pattern: /argumentos?\s+principa/i, field: "arguments" },
+  { pattern: /riscos|amea[cç]as/i, field: "risks" },
+];
+
+function splitIntoSections(text: string): { field: string; content: string }[] {
+  const sections: { field: string; content: string }[] = [];
+  let currentField: string | undefined;
+  let currentLines: string[] = [];
+
+  const flush = () => {
+    if (currentField) sections.push({ field: currentField, content: currentLines.join("\n").trim() });
+  };
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const headerMatch = rawLine.trim().match(SECTION_HEADER);
+    if (headerMatch) {
+      flush();
+      const mapped = SECTION_MAP.find((m) => m.pattern.test(headerMatch[2]));
+      currentField = mapped?.field;
+      currentLines = [];
+    } else if (currentField) {
+      currentLines.push(rawLine);
+    }
+  }
+  flush();
+  return sections;
+}
+
+function extractBullets(content: string): string[] {
+  return content
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^[-*•]\s+/.test(l))
+    .map((l) => l.replace(/^[-*•]\s+/, "").trim())
+    .filter(Boolean);
+}
+
+function firstNonEmptyLine(content: string): string {
+  return content.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
+}
+
+/**
+ * Extrai campos de relatórios organizados em seções numeradas ("1. Favorito Apontado:",
+ * "2. Placar Provável Estimado:" etc.), onde o rótulo fica sozinho numa linha e o valor vem
+ * a seguir. Assume que já foi verificado que há pelo menos 3 seções reconhecidas — quem chama
+ * decide isso (splitIntoSections) para não disparar por engano em qualquer lista numerada solta.
+ */
+function buildPartialFromSections(
+  sections: { field: string; content: string }[],
+  context: ExtractContext
+): Partial<AIReport> {
+  const partial: Partial<AIReport> = {};
+  const alternativePicks: MarketOpinion[] = [];
+  const avoidPicks: MarketOpinion[] = [];
+  const arguments_: string[] = [];
+  const risks: string[] = [];
+
+  for (const section of sections) {
+    const { field, content } = section;
+    const firstLine = firstNonEmptyLine(content);
+
+    if (field === "favorite") {
+      if (context.homeTeam && teamMatches(content, context.homeTeam)) {
+        partial.favorite = context.homeTeam;
+      } else if (context.awayTeam && teamMatches(content, context.awayTeam)) {
+        partial.favorite = context.awayTeam;
+      }
+    } else if (field === "score") {
+      partial.expectedScore = extractScorePair(content);
+    } else if (field === "main") {
+      const canonical = canonicalizeMarket(firstLine, context);
+      if (firstLine) {
+        partial.mainPick = {
+          market: canonical?.market ?? firstLine,
+          selection: canonical?.selection ?? firstLine,
+          odd: findOddInClause(content),
+          recommendation: "main",
+        };
+      }
+    } else if (field === "alternative") {
+      const canonical = canonicalizeMarket(firstLine, context);
+      if (firstLine) {
+        alternativePicks.push({
+          market: canonical?.market ?? firstLine,
+          selection: canonical?.selection ?? firstLine,
+          odd: findOddInClause(content),
+          recommendation: "alternative",
+        });
+      }
+    } else if (field === "avoid") {
+      const canonical = canonicalizeMarket(firstLine, context);
+      if (firstLine) {
+        avoidPicks.push({
+          market: canonical?.market ?? firstLine,
+          selection: canonical?.selection ?? firstLine,
+          odd: findOddInClause(content),
+          recommendation: "avoid",
+        });
+      }
+    } else if (field === "confidence") {
+      const match = firstLine.match(/(\d{1,2}(?:[.,]\d)?)/);
+      if (match) {
+        const value = parseNumber(match[1]);
+        if (value !== undefined && value >= 0 && value <= 10) partial.confidence = value;
+      }
+    } else if (field === "arguments") {
+      arguments_.push(...extractBullets(content));
+    } else if (field === "risks") {
+      risks.push(...extractBullets(content));
+    }
+  }
+
+  if (alternativePicks.length) partial.alternativePicks = alternativePicks;
+  if (avoidPicks.length) partial.avoidPicks = avoidPicks;
+  if (arguments_.length) partial.arguments = arguments_.slice(0, 3);
+  if (risks.length) partial.risks = risks.slice(0, 3);
+
+  return partial;
+}
+
+// ---------------------------------------------------------------------------
+// Passagem 3 — linguagem natural (prosa)
 // ---------------------------------------------------------------------------
 
 const MAIN_CUES = /gosto|recomendo|melhor (?:op[cç][aã]o|mercado|escolha|entrada)|principal|prefiro|aposto (?:em|no|na)|entrada principal/i;
@@ -256,12 +431,12 @@ function findMatchProbabilities(
 
   const scope = text.slice(anchorMatch.index, anchorMatch.index + 400);
   const homeKeywords = [
-    ...(context.homeTeam ? [escapeRegex(context.homeTeam)] : []),
+    ...teamKeywordVariants(context.homeTeam),
     "vit[oó]ria da casa",
     "\\bcasa\\b",
   ];
   const awayKeywords = [
-    ...(context.awayTeam ? [escapeRegex(context.awayTeam)] : []),
+    ...teamKeywordVariants(context.awayTeam),
     "vit[oó]ria (?:do|de) (?:visitante|fora)",
     "\\bvisitante\\b",
     "\\bfora\\b",
@@ -282,8 +457,8 @@ function findFavorite(text: string, context: ExtractContext): string | undefined
   const favoriteClause = clauses.find((c) => /favorit|deve vencer|tende a vencer/i.test(c));
   const searchIn = favoriteClause ?? text;
 
-  if (homeTeam && searchIn.toLowerCase().includes(homeTeam.toLowerCase())) return homeTeam;
-  if (awayTeam && searchIn.toLowerCase().includes(awayTeam.toLowerCase())) return awayTeam;
+  if (homeTeam && teamMatches(searchIn, homeTeam)) return homeTeam;
+  if (awayTeam && teamMatches(searchIn, awayTeam)) return awayTeam;
   return undefined;
 }
 
@@ -369,7 +544,11 @@ function findByCue(text: string, cue: RegExp, max: number): string[] {
   return found;
 }
 
-function extractProseFields(rawText: string, context: ExtractContext): Partial<AIReport> {
+function extractProseFields(
+  rawText: string,
+  context: ExtractContext,
+  options: { skipCueLists?: boolean } = {}
+): Partial<AIReport> {
   const { mainPick, alternativePicks, avoidPicks } = findMarketMentions(rawText, context);
   const probabilities = findMatchProbabilities(rawText, context);
 
@@ -385,9 +564,13 @@ function extractProseFields(rawText: string, context: ExtractContext): Partial<A
     alternativePicks,
     avoidPicks,
     usedExternalResearch: EXTERNAL_RESEARCH_CUES.test(rawText) ? true : undefined,
-    arguments: findByCue(rawText, ARGUMENT_CUES, 3),
-    risks: findByCue(rawText, RISK_CUES, 3),
-    inconsistencies: findByCue(rawText, INCONSISTENCY_CUES, 3),
+    ...(options.skipCueLists
+      ? {}
+      : {
+          arguments: findByCue(rawText, ARGUMENT_CUES, 3),
+          risks: findByCue(rawText, RISK_CUES, 3),
+          inconsistencies: findByCue(rawText, INCONSISTENCY_CUES, 3),
+        }),
   };
 
   return partial;

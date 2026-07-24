@@ -118,3 +118,73 @@ describe("extractAIReportFields — mesmo mercado escrito de formas diferentes p
     expect(opinion?.selection).toBe("Fora");
   });
 });
+
+describe("extractAIReportFields — formato de seções numeradas (Vasco x Mirassol)", () => {
+  // Formato real usado por 3 de 4 IAs do usuário: rótulo numa linha ("1. Favorito
+  // Apontado:"), conteúdo na(s) linha(s) seguinte(s) — bem diferente do "rótulo: valor".
+  const vascoCtx = { homeTeam: "Vasco da Gama", awayTeam: "Mirassol" };
+
+  const text = `1. Favorito Apontado:
+Vasco — O fator casa pesa bastante. Odds em torno de 2.08 refletem esse favoritismo moderado.
+
+2. Placar Provável Estimado:
+2 x 1 para o Vasco
+A tendência é de um jogo truncado.
+
+3. Palpite Principal RDT (EV+):
+Vitória do Vasco + Ambas as Equipes Marcam (BTTS Sim)
+A vitória do Vasco isolada já tem valor.
+
+4. Palpite Alternativo:
+Mais de 4,5 escanteios para o Vasco
+O Vasco tem média de 5,2 escanteios a favor por jogo.
+
+5. Mercado a Evitar (Risco):
+Placar Exato
+Apostar em placar exato neste confronto é de alto risco.
+
+6. Nota de Confiança (1 a 10):
+6,5/10
+O favoritismo do Vasco é justificado pelo fator casa.
+
+7. Argumentos Principais:
+- Fator casa decisivo: o Vasco tem 5 vitórias em 10 jogos em São Januário.
+- Necessidade extrema de pontos: ambos estão na zona de rebaixamento.
+
+8. Principais Riscos e Ameaças:
+- Pesadelo do Vasco contra o Mirassol: perdeu os 3 confrontos diretos.
+- Novo técnico do Vasco ainda sem vitória.`;
+
+  const extracted = extractAIReportFields(text, vascoCtx);
+
+  it("reconhece o time mesmo com o nome abreviado no texto ('Vasco' para 'Vasco da Gama')", () => {
+    expect(extracted.favorite).toBe("Vasco da Gama");
+  });
+
+  it("extrai placar e confiança (aceitando '6,5/10')", () => {
+    expect(extracted.expectedScore).toBe("2-1");
+    expect(extracted.confidence).toBeCloseTo(6.5);
+  });
+
+  it("NÃO reduz uma aposta combinada a apenas um dos componentes", () => {
+    // "Vitória do Vasco + BTTS Sim" não é só "BTTS Sim" — melhor manter o texto
+    // original do que apresentar uma seleção mais estreita do que a real.
+    expect(extracted.mainPick?.market).toContain("+");
+  });
+
+  it("mantém mercado sem correspondência no vocabulário como texto original", () => {
+    expect(extracted.avoidPicks?.[0]?.market).toBe("Placar Exato");
+  });
+
+  it("não confunde a nota de confiança decimal (7.5) com um novo cabeçalho de seção", () => {
+    const qwenText = text.replace("6,5/10", "7.5");
+    const requoted = extractAIReportFields(qwenText, vascoCtx);
+    expect(requoted.confidence).toBeCloseTo(7.5);
+  });
+
+  it("não deixa o título da seção vazar para dentro dos argumentos/riscos", () => {
+    expect(extracted.risks).not.toContain(expect.stringContaining("Mercado a Evitar"));
+    expect(extracted.risks?.length).toBe(2);
+    expect(extracted.arguments?.length).toBe(2);
+  });
+});
