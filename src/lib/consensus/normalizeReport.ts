@@ -13,7 +13,7 @@ export function extractAIReportFields(
   rawText: string,
   context: ExtractContext = {}
 ): Partial<AIReport> {
-  const structured = extractStructuredFields(rawText);
+  const structured = extractStructuredFields(rawText, context);
   const prose = extractProseFields(rawText, context);
   return mergeExtracted(structured, prose);
 }
@@ -41,13 +41,35 @@ const MARKET_VOCAB: MarketVocabEntry[] = [
   { market: "Ambas marcam", selection: "Sim", patterns: [/btts\s*sim/i, /ambas(?:\s+as\s+equipes)?\s+marcam/i] },
 ];
 
-/** Se o texto casar com um mercado conhecido, retorna o par canônico (mesmo nome usado pelo FutOdds). */
-function canonicalizeMarket(text: string): { market: string; selection: string } | undefined {
+const RESULT_CUE = /vence|vencer|vit[oó]ria|ganha|triunfo|favorito/i;
+
+/**
+ * Se o texto casar com um mercado conhecido, retorna o par canônico (mesmo nome usado pelo
+ * FutOdds). Além do vocabulário fixo, quando o nome de um dos times é informado, também
+ * reconhece variações como "Athletico PR vence", "Vitória do Athletico PR" ou "Athletico PR
+ * (Vitória Casa)" como o mesmo mercado — sem isso, cada IA que escrever o resultado com suas
+ * próprias palavras vira uma linha separada no consenso, mesmo dizendo a mesma coisa.
+ */
+function canonicalizeMarket(
+  text: string,
+  context: ExtractContext = {}
+): { market: string; selection: string } | undefined {
   for (const entry of MARKET_VOCAB) {
     if (entry.patterns.some((p) => p.test(text))) {
       return { market: entry.market, selection: entry.selection };
     }
   }
+
+  if (RESULT_CUE.test(text)) {
+    const lower = text.toLowerCase();
+    if (context.homeTeam && lower.includes(context.homeTeam.toLowerCase())) {
+      return { market: "Resultado final", selection: "Casa" };
+    }
+    if (context.awayTeam && lower.includes(context.awayTeam.toLowerCase())) {
+      return { market: "Resultado final", selection: "Fora" };
+    }
+  }
+
   return undefined;
 }
 
@@ -55,7 +77,7 @@ function canonicalizeMarket(text: string): { market: string; selection: string }
 // Passagem 1 — linhas "rótulo: valor"
 // ---------------------------------------------------------------------------
 
-function extractStructuredFields(rawText: string): Partial<AIReport> {
+function extractStructuredFields(rawText: string, context: ExtractContext): Partial<AIReport> {
   const lines = rawText
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -104,13 +126,13 @@ function extractStructuredFields(rawText: string): Partial<AIReport> {
       case "mercado principal":
       case "palpite principal":
       case "melhor mercado":
-        partial.mainPick = toMarketOpinion(value, "main");
+        partial.mainPick = toMarketOpinion(value, "main", context);
         break;
       case "alternativa":
       case "palpite alternativo":
         partial.alternativePicks = [
           ...(partial.alternativePicks ?? []),
-          toMarketOpinion(value, "alternative"),
+          toMarketOpinion(value, "alternative", context),
         ];
         break;
       case "evitar":
@@ -119,7 +141,7 @@ function extractStructuredFields(rawText: string): Partial<AIReport> {
       case "mercado para evitar":
         partial.avoidPicks = [
           ...(partial.avoidPicks ?? []),
-          toMarketOpinion(value, "avoid"),
+          toMarketOpinion(value, "avoid", context),
         ];
         break;
       case "argumento":
@@ -152,11 +174,12 @@ function extractStructuredFields(rawText: string): Partial<AIReport> {
 
 function toMarketOpinion(
   value: string,
-  recommendation: MarketOpinion["recommendation"]
+  recommendation: MarketOpinion["recommendation"],
+  context: ExtractContext = {}
 ): MarketOpinion {
   const oddMatch = value.match(/@\s*([\d.,]+)/);
   const text = value.replace(/@\s*[\d.,]+/, "").trim();
-  const canonical = canonicalizeMarket(text);
+  const canonical = canonicalizeMarket(text, context);
   return {
     market: canonical?.market ?? text,
     selection: canonical?.selection ?? text,
@@ -293,7 +316,10 @@ function findConfidence(text: string): number | undefined {
   return value !== undefined && value >= 0 && value <= 10 ? value : undefined;
 }
 
-function findMarketMentions(text: string): {
+function findMarketMentions(
+  text: string,
+  context: ExtractContext
+): {
   mainPick?: MarketOpinion;
   alternativePicks: MarketOpinion[];
   avoidPicks: MarketOpinion[];
@@ -304,7 +330,7 @@ function findMarketMentions(text: string): {
   let resolvedMainPick: MarketOpinion | undefined;
 
   for (const clause of toClauses(text)) {
-    const canonical = canonicalizeMarket(clause);
+    const canonical = canonicalizeMarket(clause, context);
     if (!canonical) continue;
 
     const key = `${canonical.market}|${canonical.selection}`;
@@ -344,7 +370,7 @@ function findByCue(text: string, cue: RegExp, max: number): string[] {
 }
 
 function extractProseFields(rawText: string, context: ExtractContext): Partial<AIReport> {
-  const { mainPick, alternativePicks, avoidPicks } = findMarketMentions(rawText);
+  const { mainPick, alternativePicks, avoidPicks } = findMarketMentions(rawText, context);
   const probabilities = findMatchProbabilities(rawText, context);
 
   const partial: Partial<AIReport> = {

@@ -81,3 +81,40 @@ Palpite: Vitória do Santos. Um triunfo por dois ou mais gols de diferença é u
     expect(extracted.expectedScore).toBeUndefined();
   });
 });
+
+describe("extractAIReportFields — mesmo mercado escrito de formas diferentes por IAs diferentes", () => {
+  // Caso real: 4 IAs escreveram "o time da casa vence" com palavras próprias em vez de usar
+  // o rótulo canônico "Casa" — sem o nome do time no contexto, cada frase virava um mercado
+  // diferente no Índice de Consenso, mesmo todas dizendo exatamente a mesma coisa.
+  const athleticoCtx = { homeTeam: "Athletico PR", awayTeam: "Internacional" };
+
+  const phrasings = [
+    "Alternativa: Athletico PR para vencer",
+    "Alternativa: Athletico PR (Vitória Casa)",
+    "Alternativa: Athletico PR vence",
+    "Alternativa: Vitória do Athletico PR",
+  ];
+
+  it("canoniza todas as variações para o mesmo par mercado/seleção", () => {
+    const results = phrasings.map(
+      (text) => extractAIReportFields(text, athleticoCtx).alternativePicks?.[0]
+    );
+
+    for (const opinion of results) {
+      expect(opinion?.market).toBe("Resultado final");
+      expect(opinion?.selection).toBe("Casa");
+    }
+  });
+
+  it("sem o nome do time no contexto, mantém o texto original (comportamento anterior)", () => {
+    const opinion = extractAIReportFields("Alternativa: Athletico PR vence").alternativePicks?.[0];
+    expect(opinion?.market).toBe("Athletico PR vence");
+  });
+
+  it("reconhece o time visitante da mesma forma", () => {
+    const opinion = extractAIReportFields("Evitar: Vitória do Internacional", athleticoCtx)
+      .avoidPicks?.[0];
+    expect(opinion?.market).toBe("Resultado final");
+    expect(opinion?.selection).toBe("Fora");
+  });
+});
