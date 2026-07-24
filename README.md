@@ -29,7 +29,23 @@ npm run lint       # ESLint
 npm test           # testes unitários (Vitest)
 ```
 
-Não há variáveis de ambiente obrigatórias nesta versão (ver `.env.example`).
+## Acesso restrito
+
+O site inteiro é protegido por HTTP Basic Auth (`src/middleware.ts`) — o navegador pede
+usuário e senha antes de exibir qualquer página, em qualquer hospedagem (inclusive Vercel no
+plano gratuito). As credenciais vêm de variáveis de ambiente e nunca ficam no código:
+
+```bash
+SITE_AUTH_USER=...
+SITE_AUTH_PASSWORD=...
+```
+
+Sem essas duas variáveis definidas, o acesso falha **fechado** (ninguém entra) em vez de abrir o
+site por descuido — então elas são obrigatórias em qualquer ambiente onde o app rodar, inclusive
+localmente (`.env.local`, que é ignorado pelo Git).
+
+Para trocar a senha, basta atualizar `SITE_AUTH_PASSWORD` nas variáveis de ambiente da
+hospedagem (ou no `.env.local`) e reiniciar — não é necessário alterar código.
 
 ## Arquitetura
 
