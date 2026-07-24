@@ -79,7 +79,11 @@ function extractStructuredFields(rawText: string): Partial<AIReport> {
       case "placar":
       case "placar esperado":
       case "placar-base":
-        partial.expectedScore = value.trim();
+      case "placar projetado":
+        // Normaliza para "N-N" mesmo quando o rótulo vem com o nome dos times
+        // (ex.: "Santos 2 x 0 Chapecoense") — mantém o placar comparável entre
+        // relatórios de IAs diferentes no cálculo de similaridade/consenso.
+        partial.expectedScore = extractScorePair(value) ?? value.trim();
         break;
       case "faixa de gols":
         partial.expectedGoalRange = value.trim();
@@ -260,11 +264,19 @@ function findFavorite(text: string, context: ExtractContext): string | undefined
   return undefined;
 }
 
+// Placares em português costumam usar "a" como separador ("2 a 0"), além de
+// "x" ou hífen ("2x0", "2-0").
+const SCORE_PAIR = /(\d{1,2})\s*(?:[-–x×]|\ba\b)\s*(\d{1,2})/i;
+
+/** Extrai um par "N-N" de dentro de um texto livre (ex.: "Santos 2 x 0 Chapecoense" -> "2-0"). */
+function extractScorePair(text: string): string | undefined {
+  const match = text.match(SCORE_PAIR);
+  return match ? `${match[1]}-${match[2]}` : undefined;
+}
+
 function findScore(text: string): string | undefined {
-  // Placares em português costumam usar "a" como separador ("2 a 0"), além de
-  // "x" ou hífen ("2x0", "2-0").
   const match = text.match(
-    /(?:placar|vence(?:r)? por|triunfo por|resultado provável)[^\d]{0,30}(\d{1,2})\s*(?:[-–x×]|\ba\b)\s*(\d{1,2})/i
+    new RegExp(`(?:placar|vence(?:r)? por|triunfo por|resultado provável)[^\\d]{0,30}${SCORE_PAIR.source}`, "i")
   );
   return match ? `${match[1]}-${match[2]}` : undefined;
 }
