@@ -78,6 +78,8 @@ export function ConsensusLabPanel({
           <div className="mb-4">
             <AIReportForm
               editingReport={editing}
+              homeTeam={analysis.futOdds.info.homeTeam}
+              awayTeam={analysis.futOdds.info.awayTeam}
               onSave={handleSave}
               onCancel={() => {
                 setShowForm(false);

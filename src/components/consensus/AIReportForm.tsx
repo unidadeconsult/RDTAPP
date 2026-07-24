@@ -7,6 +7,11 @@ import { extractAIReportFields } from "@/lib/consensus/normalizeReport";
 
 const PROVIDER_OPTIONS = ["ChatGPT", "Kimi", "DeepSeek", "Perplexity", "Qwen"];
 
+/** Converte fração (0-1) para string percentual sem artefatos de ponto flutuante (ex.: 55.00000000000001). */
+function toPercentString(value: number): string {
+  return String(Math.round(value * 1000) / 10);
+}
+
 type FormState = {
   provider: string;
   rawText: string;
@@ -60,9 +65,9 @@ function reportToState(report: AIReport): FormState {
     favorite: report.favorite ?? "",
     expectedScore: report.expectedScore ?? "",
     expectedGoalRange: report.expectedGoalRange ?? "",
-    homeProbability: report.homeProbability !== undefined ? String(report.homeProbability * 100) : "",
-    drawProbability: report.drawProbability !== undefined ? String(report.drawProbability * 100) : "",
-    awayProbability: report.awayProbability !== undefined ? String(report.awayProbability * 100) : "",
+    homeProbability: report.homeProbability !== undefined ? toPercentString(report.homeProbability) : "",
+    drawProbability: report.drawProbability !== undefined ? toPercentString(report.drawProbability) : "",
+    awayProbability: report.awayProbability !== undefined ? toPercentString(report.awayProbability) : "",
     confidence: report.confidence !== undefined ? String(report.confidence) : "",
     mainMarket: report.mainPick?.selection ?? "",
     mainOdd: report.mainPick?.odd !== undefined ? String(report.mainPick.odd) : "",
@@ -91,10 +96,14 @@ function toOpinion(
 
 export function AIReportForm({
   editingReport,
+  homeTeam,
+  awayTeam,
   onSave,
   onCancel,
 }: {
   editingReport?: AIReport;
+  homeTeam?: string;
+  awayTeam?: string;
   onSave: (report: AIReport) => void;
   onCancel?: () => void;
 }) {
@@ -105,22 +114,22 @@ export function AIReportForm({
   const update = (patch: Partial<FormState>) => setState((s) => ({ ...s, ...patch }));
 
   const autoExtract = () => {
-    const extracted = extractAIReportFields(state.rawText);
+    const extracted = extractAIReportFields(state.rawText, { homeTeam, awayTeam });
     update({
       favorite: extracted.favorite ?? state.favorite,
       expectedScore: extracted.expectedScore ?? state.expectedScore,
       expectedGoalRange: extracted.expectedGoalRange ?? state.expectedGoalRange,
       homeProbability:
         extracted.homeProbability !== undefined
-          ? String(extracted.homeProbability * 100)
+          ? toPercentString(extracted.homeProbability)
           : state.homeProbability,
       drawProbability:
         extracted.drawProbability !== undefined
-          ? String(extracted.drawProbability * 100)
+          ? toPercentString(extracted.drawProbability)
           : state.drawProbability,
       awayProbability:
         extracted.awayProbability !== undefined
-          ? String(extracted.awayProbability * 100)
+          ? toPercentString(extracted.awayProbability)
           : state.awayProbability,
       confidence: extracted.confidence !== undefined ? String(extracted.confidence) : state.confidence,
       mainMarket: extracted.mainPick?.selection ?? state.mainMarket,
@@ -233,7 +242,7 @@ export function AIReportForm({
           rows={6}
           value={state.rawText}
           onChange={(e) => update({ rawText: e.target.value })}
-          placeholder={"Favorito: ...\nPlacar: ...\nCasa: 55%\nMercado principal: Under 3.5 @1.62\nArgumentos: ...\nRiscos: ..."}
+          placeholder={"Cole a resposta da IA — funciona tanto em texto livre (\"Acho o time X favorito, o mercado com mais valor é Under 3.5 a 1.62...\") quanto no formato \"rótulo: valor\" (Favorito: ...\\nMercado principal: Under 3.5 @1.62)."}
           className="w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm outline-none focus:border-blue dark:border-white/10 dark:bg-white/5 dark:text-white"
         />
       </div>
