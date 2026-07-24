@@ -34,6 +34,8 @@ const MARKET_VOCAB: MarketVocabEntry[] = [
   { market: "Gols", selection: "Under 3.5", patterns: [/under\s*3[.,]5/i, /menos de 3[.,]5 gols/i] },
   { market: "Gols", selection: "Under 2.5", patterns: [/under\s*2[.,]5/i, /menos de 2[.,]5 gols/i] },
   { market: "Gols", selection: "Over 3.5", patterns: [/over\s*3[.,]5/i, /mais de 3[.,]5 gols/i] },
+  { market: "Gols", selection: "Over 1.5", patterns: [/over\s*1[.,]5/i, /mais de 1[.,]5 gols?/i] },
+  { market: "Gols", selection: "Under 1.5", patterns: [/under\s*1[.,]5/i, /menos de 1[.,]5 gols?/i] },
   { market: "Gols 1º tempo", selection: "Over 0.5 HT", patterns: [/over\s*0[.,]5\s*(?:ht|1t)?/i, /gol no primeiro tempo/i] },
   { market: "Ambas marcam", selection: "Não", patterns: [/btts\s*n[aã]o/i, /ambas(?:\s+as\s+equipes)?\s+n[aã]o\s+marcam/i] },
   { market: "Ambas marcam", selection: "Sim", patterns: [/btts\s*sim/i, /ambas(?:\s+as\s+equipes)?\s+marcam/i] },
@@ -97,6 +99,7 @@ function extractStructuredFields(rawText: string): Partial<AIReport> {
         break;
       case "mercado principal":
       case "palpite principal":
+      case "melhor mercado":
         partial.mainPick = toMarketOpinion(value, "main");
         break;
       case "alternativa":
@@ -107,6 +110,9 @@ function extractStructuredFields(rawText: string): Partial<AIReport> {
         ];
         break;
       case "evitar":
+      case "mercado a evitar":
+      case "mercado sem valor":
+      case "mercado para evitar":
         partial.avoidPicks = [
           ...(partial.avoidPicks ?? []),
           toMarketOpinion(value, "avoid"),
@@ -187,17 +193,58 @@ function findOddInClause(clause: string): number | undefined {
   return match ? parseNumber(match[1]) : undefined;
 }
 
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function findProbability(text: string, keywordPatterns: string[]): number | undefined {
   for (const keyword of keywordPatterns) {
     // "NN% de <termo>" é o padrão mais comum quando várias probabilidades são
-    // listadas em sequência ("55%... 22% de empate e 23% para o visitante"),
-    // então tenta primeiro — o "[^%]" impede pular por cima de outro percentual.
-    const backward = new RegExp(`(\\d{1,3}(?:[.,]\\d+)?)\\s*%[^%]{0,25}?(?:${keyword})`, "i");
-    const forward = new RegExp(`(?:${keyword})[^%\\d]{0,30}(\\d{1,3}(?:[.,]\\d+)?)\\s*%`, "i");
+    // listadas em sequência ("55%... 22% de empate e 23% para o visitante", ou
+    // uma tabela "Santos\t64%\nEmpate\t23%"), então tenta primeiro. "[^%\d\n]"
+    // impede pular por cima de outro percentual, número ou linha da tabela.
+    const backward = new RegExp(`(\\d{1,3}(?:[.,]\\d+)?)\\s*%[^%\\d\\n]{0,20}?(?:${keyword})`, "i");
+    const forward = new RegExp(`(?:${keyword})[^%\\d\\n]{0,20}(\\d{1,3}(?:[.,]\\d+)?)\\s*%`, "i");
     const match = text.match(backward) ?? text.match(forward);
     if (match) return parsePercent(match[1]);
   }
   return undefined;
+}
+
+const PROBABILITY_ANCHOR = /probabilidad|proje[cç][aã]o de (?:resultado|probabilidades)|chance de (?:vencer|vit[oó]ria)/i;
+
+/**
+ * Só tenta extrair probabilidades de resultado quando o texto tem uma menção
+ * explícita a "probabilidade/projeção" por perto. Relatórios reais de IA costumam
+ * estar cheios de outros percentuais (aproveitamento, posse, conversão...) que não
+ * têm relação com a probabilidade do resultado — sem essa âncora, o risco de
+ * associar o número errado ao mercado errado é alto demais para valer a pena.
+ */
+function findMatchProbabilities(
+  text: string,
+  context: ExtractContext
+): { home?: number; draw?: number; away?: number } {
+  const anchorMatch = text.match(PROBABILITY_ANCHOR);
+  if (!anchorMatch || anchorMatch.index === undefined) return {};
+
+  const scope = text.slice(anchorMatch.index, anchorMatch.index + 400);
+  const homeKeywords = [
+    ...(context.homeTeam ? [escapeRegex(context.homeTeam)] : []),
+    "vit[oó]ria da casa",
+    "\\bcasa\\b",
+  ];
+  const awayKeywords = [
+    ...(context.awayTeam ? [escapeRegex(context.awayTeam)] : []),
+    "vit[oó]ria (?:do|de) (?:visitante|fora)",
+    "\\bvisitante\\b",
+    "\\bfora\\b",
+  ];
+
+  return {
+    home: findProbability(scope, homeKeywords),
+    draw: findProbability(scope, ["\\bempate\\b"]),
+    away: findProbability(scope, awayKeywords),
+  };
 }
 
 function findFavorite(text: string, context: ExtractContext): string | undefined {
@@ -214,7 +261,11 @@ function findFavorite(text: string, context: ExtractContext): string | undefined
 }
 
 function findScore(text: string): string | undefined {
-  const match = text.match(/placar[^\d]{0,30}(\d{1,2})\s*[-–x×]\s*(\d{1,2})/i);
+  // Placares em português costumam usar "a" como separador ("2 a 0"), além de
+  // "x" ou hífen ("2x0", "2-0").
+  const match = text.match(
+    /(?:placar|vence(?:r)? por|triunfo por|resultado provável)[^\d]{0,30}(\d{1,2})\s*(?:[-–x×]|\ba\b)\s*(\d{1,2})/i
+  );
   return match ? `${match[1]}-${match[2]}` : undefined;
 }
 
@@ -282,18 +333,15 @@ function findByCue(text: string, cue: RegExp, max: number): string[] {
 
 function extractProseFields(rawText: string, context: ExtractContext): Partial<AIReport> {
   const { mainPick, alternativePicks, avoidPicks } = findMarketMentions(rawText);
+  const probabilities = findMatchProbabilities(rawText, context);
 
   const partial: Partial<AIReport> = {
     favorite: findFavorite(rawText, context),
     expectedScore: findScore(rawText),
     expectedGoalRange: findGoalRange(rawText),
-    homeProbability: findProbability(rawText, ["vit[oó]ria da casa", "\\bcasa\\b"]),
-    drawProbability: findProbability(rawText, ["\\bempate\\b"]),
-    awayProbability: findProbability(rawText, [
-      "vit[oó]ria (?:do|de) (?:visitante|fora)",
-      "\\bvisitante\\b",
-      "\\bfora\\b",
-    ]),
+    homeProbability: probabilities.home,
+    drawProbability: probabilities.draw,
+    awayProbability: probabilities.away,
     confidence: findConfidence(rawText),
     mainPick,
     alternativePicks,
